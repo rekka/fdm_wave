@@ -1,0 +1,10 @@
+[package]
+authors = ["Norbert Pozar <bertapozar@gmail.com>"]
+name = "fdm-wave"
+version = "0.1.0"
+
+[dependencies]
+ndarray = "0.6"
+ndarray-rand = "0.2.0"
+rand = "0.3.14"
+simd = "0.1.1"
