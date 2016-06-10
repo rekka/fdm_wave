@@ -5,6 +5,9 @@ version = "0.1.0"
 
 [dependencies]
 ndarray = "0.6"
+rayon = "0.4.0"
+simd = "0.1.1"
+
+[dev-dependencies]
 ndarray-rand = "0.2.0"
 rand = "0.3.14"
-simd = "0.1.1"
