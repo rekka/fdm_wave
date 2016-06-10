@@ -1,7 +1,8 @@
 [package]
 authors = ["Norbert Pozar <bertapozar@gmail.com>"]
-name = "fdm-wave"
+name = "fdm_wave"
 version = "0.1.0"
+license = "MIT"
 
 [dependencies]
 ndarray = "0.6"
