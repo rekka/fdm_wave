@@ -172,7 +172,8 @@ fn wave_step_sub(u: &[f64],
     debug_assert_eq!(v.len(), n);
     debug_assert_eq!(w.len(), (re - rs) * nx);
 
-    let simd_nx = (nx / 4).saturating_sub(1);
+    let simd_width = 4;
+    let simd_nx = (nx / simd_width).saturating_sub(1);
     let w_offset = rs * nx;
 
     for i in rs..re {
@@ -186,23 +187,23 @@ fn wave_step_sub(u: &[f64],
                 let mut v1 = f64x4::load_unchecked(v, s1);
                 let mut vp1 = f64x4::splat(f64::load_unchecked(v, s1));
                 for j in 0..simd_nx {
-                    let v0 = f64x4::load_unchecked(v, s0 + j * 4);
-                    let vn1 = f64x4::load_unchecked(v, s1 + j * 4 + 4);
-                    let v2 = f64x4::load_unchecked(v, s2 + j * 4);
-                    let u1 = f64x4::load_unchecked(u, s1 + j * 4);
+                    let v0 = f64x4::load_unchecked(v, s0 + j * simd_width);
+                    let vn1 = f64x4::load_unchecked(v, s1 + (j + 1) * simd_width);
+                    let v2 = f64x4::load_unchecked(v, s2 + j * simd_width);
+                    let u1 = f64x4::load_unchecked(u, s1 + j * simd_width);
                     let vl1 =
                         f64x4::new(vp1.extract(3), v1.extract(0), v1.extract(1), v1.extract(2));
                     let vr1 =
                         f64x4::new(v1.extract(1), v1.extract(2), v1.extract(3), vn1.extract(0));
                     let w1 = f64x4::splat(2. - 4. * mu) * v1 - u1 +
                              f64x4::splat(mu) * (vl1 + vr1 + v0 + v2);
-                    w1.store_unchecked(w, s1 + j * 4 - w_offset);
+                    w1.store_unchecked(w, s1 + j * simd_width - w_offset);
                     vp1 = v1;
                     v1 = vn1;
                 }
             }
             // run the rest using single data instructions
-            let js = simd_nx * 4;
+            let js = simd_nx * simd_width;
             let mut v1 = f64::load_unchecked(v, s1 + js);
             let mut vp1 = f64::load_unchecked(v, s1 + js.saturating_sub(1));
             for j in js..nx {
