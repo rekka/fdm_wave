@@ -159,19 +159,28 @@ pub fn wave_step(u: &[f64], v: &[f64], w: &mut [f64], dim: (usize, usize), mu: f
     }
 }
 
-pub fn wave_step_single(u: &[f64], v: &[f64], w: &mut [f64], dim: (usize, usize), mu: f64) {
+fn wave_step_sub(u: &[f64],
+                 v: &[f64],
+                 w: &mut [f64],
+                 dim: (usize, usize),
+                 rows: (usize, usize),
+                 mu: f64) {
     let (ny, nx) = dim;
+    let (rs, re) = rows;
     let n = nx * ny;
-    assert_eq!(u.len(), n);
-    assert_eq!(v.len(), n);
-    assert_eq!(w.len(), n);
+    debug_assert!(rs < re);
+    debug_assert!(re <= ny);
+    debug_assert_eq!(u.len(), n);
+    debug_assert_eq!(v.len(), n);
+    debug_assert_eq!(w.len(), (re - rs) * nx);
 
     let simd_nx = (nx / 4).saturating_sub(1);
 
     let co = f64x4::splat(mu);
     let cc = f64x4::splat(2. - 4. * mu);
+    let w_offset = rs * nx;
 
-    for i in 0..ny {
+    for i in rs..re {
         let s0 = nx * i.saturating_sub(1);
         let s1 = nx * i;
         let s2 = nx * min(i + 1, ny - 1);
@@ -191,7 +200,7 @@ pub fn wave_step_single(u: &[f64], v: &[f64], w: &mut [f64], dim: (usize, usize)
                     let vr1 =
                         f64x4::new(v1.extract(1), v1.extract(2), v1.extract(3), vn1.extract(0));
                     let w1 = cc * v1 - u1 + co * (vl1 + vr1 + v0 + v2);
-                    store_unchecked(w1, w, s1 + j * 4);
+                    store_unchecked(w1, w, s1 + j * 4 - w_offset);
                     vp1 = v1;
                     v1 = vn1;
                 }
@@ -200,10 +209,20 @@ pub fn wave_step_single(u: &[f64], v: &[f64], w: &mut [f64], dim: (usize, usize)
         for j in simd_nx * 4..nx {
             let jl = j.saturating_sub(1);
             let jr = std::cmp::min(j + 1, nx - 1);
-            w[s1 + j] = 2. * v[s1 + j] - u[s1 + j] +
+            w[s1 + j - w_offset] = 2. * v[s1 + j] - u[s1 + j] +
                         mu * (v[s1 + jl] + v[s1 + jr] + v[s0 + j] + v[s2 + j] - 4. * v[s1 + j]);
         }
     }
+}
+
+pub fn wave_step_single(u: &[f64], v: &[f64], w: &mut [f64], dim: (usize, usize), mu: f64) {
+    let (ny, nx) = dim;
+    let n = nx * ny;
+    assert_eq!(u.len(), n);
+    assert_eq!(v.len(), n);
+    assert_eq!(w.len(), n);
+
+    wave_step_sub(u, v, w, dim, (0, dim.0), mu);
 }
 
 pub fn wave_step_parallel(u: &[f64], v: &[f64], w: &mut [f64], dim: (usize, usize), mu: f64) {
@@ -213,86 +232,21 @@ pub fn wave_step_parallel(u: &[f64], v: &[f64], w: &mut [f64], dim: (usize, usiz
     assert_eq!(v.len(), n);
     assert_eq!(w.len(), n);
 
-    struct Env {
-        nx: usize,
-        ny: usize,
-        simd_nx: usize,
-        co: f64x4,
-        cc: f64x4,
-        mu: f64,
-    };
-
-
-    let env = Env {
-        nx: nx,
-        ny: ny,
-        simd_nx: (nx / 4).saturating_sub(1),
-
-        co: f64x4::splat(mu),
-        cc: f64x4::splat(2. - 4. * mu),
-        mu: mu,
-    };
-
-
-    // find optimal num of rows per thread
-
-    fn inner(env: &Env, u: &[f64], v: &[f64], w: &mut [f64], row_start: usize, row_end: usize) {
-        let nx = env.nx;
-        let ny = env.ny;
-        let simd_nx = env.simd_nx;
-        let co = env.co;
-        let cc = env.cc;
-        let mu = env.mu;
-
+    fn inner(u: &[f64], v: &[f64], w: &mut [f64], dim: (usize, usize), rows: (usize, usize), mu: f64) {
         let elems_per_thread = 200 * 1024;
+        let (row_start, row_end) = rows;
         if row_end - row_start > 1 && w.len() > elems_per_thread {
+            let (_, nx) = dim;
             let mid = (row_start + row_end) / 2;
             let (left, right) = w.split_at_mut((mid - row_start) * nx);
-            rayon::join(|| inner(env, u, v, left, row_start, mid),
-                        || inner(env, u, v, right, mid, row_end));
+            rayon::join(|| inner(u, v, left, dim, (row_start, mid), mu),
+                        || inner(u, v, right, dim, (mid, row_end), mu));
         } else {
-            for i in row_start..row_end {
-                let s0 = nx * i.saturating_sub(1);
-                let s1 = nx * i;
-                let s2 = nx * min(i + 1, ny - 1);
-
-                if simd_nx > 0 {
-                    // initialize data
-                    let mut v1 = f64x4::load(v, s1);
-                    let mut vp1 = f64x4::splat(v[s1]);
-                    for j in 0..simd_nx {
-                        unsafe {
-                            let v0 = load_unchecked(v, s0 + j * 4);
-                            let vn1 = load_unchecked(v, s1 + j * 4 + 4);
-                            let v2 = load_unchecked(v, s2 + j * 4);
-                            let u1 = load_unchecked(u, s1 + j * 4);
-                            let vl1 = f64x4::new(vp1.extract(3),
-                                                 v1.extract(0),
-                                                 v1.extract(1),
-                                                 v1.extract(2));
-                            let vr1 = f64x4::new(v1.extract(1),
-                                                 v1.extract(2),
-                                                 v1.extract(3),
-                                                 vn1.extract(0));
-                            let w1 = cc * v1 - u1 + co * (vl1 + vr1 + v0 + v2);
-                            store_unchecked(w1, w, s1 + j * 4 - row_start * nx);
-                            vp1 = v1;
-                            v1 = vn1;
-                        }
-                    }
-                }
-                for j in simd_nx * 4..nx {
-                    let jl = j.saturating_sub(1);
-                    let jr = std::cmp::min(j + 1, nx - 1);
-                    w[s1 + j - row_start * nx] =
-                        2. * v[s1 + j] - u[s1 + j] +
-                        mu * (v[s1 + jl] + v[s1 + jr] + v[s0 + j] + v[s2 + j] - 4. * v[s1 + j]);
-                }
-            }
+            wave_step_sub(u, v, w, dim, rows, mu);
         }
     };
 
-    inner(&env, u, v, w, 0, ny);
+    inner(u, v, w, dim, (0, ny), mu);
 }
 
 #[cfg(test)]
@@ -390,5 +344,6 @@ mod test {
         test_dim(3, 20);
         test_dim(20, 3);
         test_dim(20, 20);
+        test_dim(2048, 2048);
     }
 }
