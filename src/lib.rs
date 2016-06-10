@@ -10,7 +10,6 @@ extern crate ndarray_rand;
 extern crate rand;
 
 extern crate simd;
-use simd::Simd;
 use simd::x86::avx::f64x4;
 
 use std::cmp::min;
@@ -20,12 +19,14 @@ use std::cmp::min;
 struct Unalign<T>(T);
 
 /// Unaligned loads and stores, unchecked in the release build.
-trait UncheckedLoadStore: Simd {
+trait UncheckedLoadStore {
+    type Elem;
     unsafe fn load_unchecked(array: &[Self::Elem], idx: usize) -> Self;
     unsafe fn store_unchecked(self, array: &mut [Self::Elem], idx: usize);
 }
 
 impl UncheckedLoadStore for f64x4 {
+    type Elem = f64;
     #[inline]
     unsafe fn load_unchecked(array: &[Self::Elem], idx: usize) -> Self {
         debug_assert!(idx + 4 <= array.len());
@@ -39,6 +40,21 @@ impl UncheckedLoadStore for f64x4 {
         debug_assert!(idx + 4 <= array.len());
         let place = array.as_mut_ptr().offset(idx as isize);
         *(place as *mut Unalign<f64x4>) = Unalign(self);
+    }
+}
+
+impl UncheckedLoadStore for f64 {
+    type Elem = f64;
+    #[inline]
+    unsafe fn load_unchecked(array: &[Self::Elem], idx: usize) -> Self {
+        debug_assert!(idx < array.len());
+        *array.get_unchecked(idx)
+    }
+
+    #[inline]
+    unsafe fn store_unchecked(self, array: &mut [Self::Elem], idx: usize) {
+        debug_assert!(idx < array.len());
+        *array.get_unchecked_mut(idx) = self;
     }
 }
 
@@ -149,6 +165,7 @@ fn wave_step_sub(u: &[f64],
     let (ny, nx) = dim;
     let (rs, re) = rows;
     let n = nx * ny;
+    // sanity checks
     debug_assert!(rs < re);
     debug_assert!(re <= ny);
     debug_assert_eq!(u.len(), n);
@@ -156,9 +173,6 @@ fn wave_step_sub(u: &[f64],
     debug_assert_eq!(w.len(), (re - rs) * nx);
 
     let simd_nx = (nx / 4).saturating_sub(1);
-
-    let co = f64x4::splat(mu);
-    let cc = f64x4::splat(2. - 4. * mu);
     let w_offset = rs * nx;
 
     for i in rs..re {
@@ -166,12 +180,12 @@ fn wave_step_sub(u: &[f64],
         let s1 = nx * i;
         let s2 = nx * min(i + 1, ny - 1);
 
-        if simd_nx > 0 {
-            // initialize data
-            let mut v1 = f64x4::load(v, s1);
-            let mut vp1 = f64x4::splat(v[s1]);
-            for j in 0..simd_nx {
-                unsafe {
+        unsafe {
+            if simd_nx > 0 {
+                // initialize data
+                let mut v1 = f64x4::load_unchecked(v, s1);
+                let mut vp1 = f64x4::splat(f64::load_unchecked(v, s1));
+                for j in 0..simd_nx {
                     let v0 = f64x4::load_unchecked(v, s0 + j * 4);
                     let vn1 = f64x4::load_unchecked(v, s1 + j * 4 + 4);
                     let v2 = f64x4::load_unchecked(v, s2 + j * 4);
@@ -180,19 +194,30 @@ fn wave_step_sub(u: &[f64],
                         f64x4::new(vp1.extract(3), v1.extract(0), v1.extract(1), v1.extract(2));
                     let vr1 =
                         f64x4::new(v1.extract(1), v1.extract(2), v1.extract(3), vn1.extract(0));
-                    let w1 = cc * v1 - u1 + co * (vl1 + vr1 + v0 + v2);
+                    let w1 = f64x4::splat(2. - 4. * mu) * v1 - u1 +
+                             f64x4::splat(mu) * (vl1 + vr1 + v0 + v2);
                     w1.store_unchecked(w, s1 + j * 4 - w_offset);
                     vp1 = v1;
                     v1 = vn1;
                 }
             }
-        }
-        for j in simd_nx * 4..nx {
-            let jl = j.saturating_sub(1);
-            let jr = std::cmp::min(j + 1, nx - 1);
-            w[s1 + j - w_offset] =
-                2. * v[s1 + j] - u[s1 + j] +
-                mu * (v[s1 + jl] + v[s1 + jr] + v[s0 + j] + v[s2 + j] - 4. * v[s1 + j]);
+            // run the rest using single data instructions
+            let js = simd_nx * 4;
+            let mut v1 = f64::load_unchecked(v, s1 + js);
+            let mut vp1 = f64::load_unchecked(v, s1 + js.saturating_sub(1));
+            for j in js..nx {
+                let jr = std::cmp::min(j + 1, nx - 1);
+                let v0 = f64::load_unchecked(v, s0 + j);
+                let vn1 = f64::load_unchecked(v, s1 + jr);
+                let v2 = f64::load_unchecked(v, s2 + j);
+                let u1 = f64::load_unchecked(u, s1 + j);
+                let vl1 = vp1;
+                let vr1 = vn1;
+                let w1 = (2. - 4. * mu) * v1 - u1 + mu * (vl1 + vr1 + v0 + v2);
+                w1.store_unchecked(w, s1 + j - w_offset);
+                vp1 = v1;
+                v1 = vn1;
+            }
         }
     }
 }
