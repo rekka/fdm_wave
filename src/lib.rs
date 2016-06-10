@@ -58,6 +58,29 @@ impl UncheckedLoadStore for f64 {
     }
 }
 
+/// Rotate values by one lane left or right, filling the empty value by the value from `filler`.
+trait RotateOne {
+    fn rotate_one_left(self, filler: Self) -> Self;
+    fn rotate_one_right(self, filler: Self) -> Self;
+}
+
+impl RotateOne for f64x4 {
+    #[inline]
+    fn rotate_one_left(self, filler: Self) -> Self {
+        Self::new(self.extract(1),
+                  self.extract(2),
+                  self.extract(3),
+                  filler.extract(0))
+    }
+    #[inline]
+    fn rotate_one_right(self, filler: Self) -> Self {
+        Self::new(filler.extract(3),
+                  self.extract(0),
+                  self.extract(1),
+                  self.extract(2))
+    }
+}
+
 /// Same as `wave_step`, but runs two rows at the same time.
 pub fn wave_step_double(u: &[f64], v: &[f64], w: &mut [f64], dim: (usize, usize), mu: f64) {
     let (ny, nx) = dim;
@@ -191,10 +214,8 @@ fn wave_step_sub(u: &[f64],
                     let vn1 = f64x4::load_unchecked(v, s1 + (j + 1) * simd_width);
                     let v2 = f64x4::load_unchecked(v, s2 + j * simd_width);
                     let u1 = f64x4::load_unchecked(u, s1 + j * simd_width);
-                    let vl1 =
-                        f64x4::new(vp1.extract(3), v1.extract(0), v1.extract(1), v1.extract(2));
-                    let vr1 =
-                        f64x4::new(v1.extract(1), v1.extract(2), v1.extract(3), vn1.extract(0));
+                    let vl1 = v1.rotate_one_right(vp1);
+                    let vr1 = v1.rotate_one_left(vn1);
                     let w1 = f64x4::splat(2. - 4. * mu) * v1 - u1 +
                              f64x4::splat(mu) * (vl1 + vr1 + v0 + v2);
                     w1.store_unchecked(w, s1 + j * simd_width - w_offset);
