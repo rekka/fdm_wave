@@ -1,25 +1,29 @@
 //! Finite difference method for the wave equation with Neumann boundary data.
 #![feature(cfg_target_feature)]
-extern crate ndarray;
 extern crate rayon;
 
+#[cfg(test)]
+extern crate ndarray;
 #[cfg(test)]
 extern crate ndarray_rand;
 #[cfg(test)]
 extern crate rand;
 
 extern crate simd;
+use simd::Simd;
 #[cfg(target_feature = "avx")]
 use simd::x86::avx::f64x4;
 
-use ndarray::{Array, Ix};
 use std::cmp::min;
-
-pub type Array2d = Array<f64, (Ix, Ix)>;
 
 #[repr(packed)]
 #[derive(Debug, Copy, Clone)]
 struct Unalign<T>(T);
+
+trait UncheckedLoadStore: Simd {
+    unsafe fn load_unchecked(array: &[Self::Elem], idx: usize) -> Self;
+    unsafe fn store_unchecked(self, array: &[Self::Elem], idx: usize);
+}
 
 #[inline]
 unsafe fn load_unchecked(array: &[f64], idx: usize) -> f64x4 {
@@ -36,33 +40,8 @@ unsafe fn store_unchecked(x: f64x4, array: &mut [f64], idx: usize) {
     *(place as *mut Unalign<f64x4>) = Unalign(x);
 }
 
-/// Reference implementation.
-/// mu = τ²/h²
-pub fn wave_step_ndarray(w: &Array2d, u: &Array2d, v: &mut Array2d, mu: f64) {
-    let (ny, nx) = u.dim();
-    for j in 0..ny {
-        for i in 0..nx {
-            let uc = u[(j, i)];
-            let ul = u[(j, i.saturating_sub(1))];
-            let ur = u[(j, min(i + 1, nx - 1))];
-            let ut = u[(j.saturating_sub(1), i)];
-            let ub = u[(min(j + 1, ny - 1), i)];
-            v[(j, i)] = 2. * uc - w[(j, i)] + mu * (ul + ur + ut + ub - 4. * uc);
-        }
-    }
-}
-
-/// Performs one step of the finite difference scheme for the wave equation with zero Neumann
-/// boundary condition.
-///
-/// The discretization is the standard central 2nd order difference in both space and time.
-///
-/// - `u`: value at step `n - 1`
-/// - `v`: value at step `n`
-/// - `w`: computed value at step `n + 1`
-/// - `dim`: format `(ny, nx)` so that memory layout for `u`, `v` and `w` is `[[f64 ; nx]; ny]`
-/// - `mu`: τ²/h², where τ is the time step and h is the space step
-pub fn wave_step(u: &[f64], v: &[f64], w: &mut [f64], dim: (usize, usize), mu: f64) {
+/// Same as `wave_step`, but runs two rows at the same time.
+pub fn wave_step_double(u: &[f64], v: &[f64], w: &mut [f64], dim: (usize, usize), mu: f64) {
     let (ny, nx) = dim;
     let n = nx * ny;
     assert_eq!(u.len(), n);
@@ -209,13 +188,24 @@ fn wave_step_sub(u: &[f64],
         for j in simd_nx * 4..nx {
             let jl = j.saturating_sub(1);
             let jr = std::cmp::min(j + 1, nx - 1);
-            w[s1 + j - w_offset] = 2. * v[s1 + j] - u[s1 + j] +
-                        mu * (v[s1 + jl] + v[s1 + jr] + v[s0 + j] + v[s2 + j] - 4. * v[s1 + j]);
+            w[s1 + j - w_offset] =
+                2. * v[s1 + j] - u[s1 + j] +
+                mu * (v[s1 + jl] + v[s1 + jr] + v[s0 + j] + v[s2 + j] - 4. * v[s1 + j]);
         }
     }
 }
 
-pub fn wave_step_single(u: &[f64], v: &[f64], w: &mut [f64], dim: (usize, usize), mu: f64) {
+/// Performs one step of the finite difference scheme for the wave equation with zero Neumann
+/// boundary condition.
+///
+/// The discretization is the standard central 2nd order difference in both space and time.
+///
+/// - `u`: value at step `n - 1`
+/// - `v`: value at step `n`
+/// - `w`: computed value at step `n + 1`
+/// - `dim`: format `(ny, nx)` so that memory layout for `u`, `v` and `w` is `[[f64 ; nx]; ny]`
+/// - `mu`: τ²/h², where τ is the time step and h is the space step
+pub fn wave_step(u: &[f64], v: &[f64], w: &mut [f64], dim: (usize, usize), mu: f64) {
     let (ny, nx) = dim;
     let n = nx * ny;
     assert_eq!(u.len(), n);
@@ -225,6 +215,9 @@ pub fn wave_step_single(u: &[f64], v: &[f64], w: &mut [f64], dim: (usize, usize)
     wave_step_sub(u, v, w, dim, (0, dim.0), mu);
 }
 
+/// Same as `wave_step`, attempting to run in parallel.
+///
+/// Does not increase the performance :(.
 pub fn wave_step_parallel(u: &[f64], v: &[f64], w: &mut [f64], dim: (usize, usize), mu: f64) {
     let (ny, nx) = dim;
     let n = nx * ny;
@@ -232,7 +225,12 @@ pub fn wave_step_parallel(u: &[f64], v: &[f64], w: &mut [f64], dim: (usize, usiz
     assert_eq!(v.len(), n);
     assert_eq!(w.len(), n);
 
-    fn inner(u: &[f64], v: &[f64], w: &mut [f64], dim: (usize, usize), rows: (usize, usize), mu: f64) {
+    fn inner(u: &[f64],
+             v: &[f64],
+             w: &mut [f64],
+             dim: (usize, usize),
+             rows: (usize, usize),
+             mu: f64) {
         let elems_per_thread = 200 * 1024;
         let (row_start, row_end) = rows;
         if row_end - row_start > 1 && w.len() > elems_per_thread {
@@ -252,9 +250,29 @@ pub fn wave_step_parallel(u: &[f64], v: &[f64], w: &mut [f64], dim: (usize, usiz
 #[cfg(test)]
 mod test {
     use rand::distributions::Range;
-    use ndarray::Array;
     use ndarray_rand::RandomExt;
     use super::*;
+    use std::cmp::min;
+
+    use ndarray::{Array, Ix};
+    type Array2d = Array<f64, (Ix, Ix)>;
+
+
+    /// Reference implementation.
+    /// mu = τ²/h²
+    fn wave_step_reference(w: &Array2d, u: &Array2d, v: &mut Array2d, mu: f64) {
+        let (ny, nx) = u.dim();
+        for j in 0..ny {
+            for i in 0..nx {
+                let uc = u[(j, i)];
+                let ul = u[(j, i.saturating_sub(1))];
+                let ur = u[(j, min(i + 1, nx - 1))];
+                let ut = u[(j.saturating_sub(1), i)];
+                let ub = u[(min(j + 1, ny - 1), i)];
+                v[(j, i)] = 2. * uc - w[(j, i)] + mu * (ul + ur + ut + ub - 4. * uc);
+            }
+        }
+    }
 
     fn test_dim(ny: usize, nx: usize) {
         let dim = (ny, nx);
@@ -265,7 +283,7 @@ mod test {
         // let v = Array::from_elem(dim, 1.);
         let mut w_ref = Array::zeros(dim);
 
-        wave_step_ndarray(&u, &v, &mut w_ref, mu);
+        wave_step_reference(&u, &v, &mut w_ref, mu);
 
         let mut w = Array::zeros(dim);
         wave_step(u.as_slice().unwrap(),
@@ -291,7 +309,7 @@ mod test {
         }
 
         let mut w = Array::zeros(dim);
-        wave_step_single(u.as_slice().unwrap(),
+        wave_step_double(u.as_slice().unwrap(),
                          v.as_slice().unwrap(),
                          w.as_slice_mut().unwrap(),
                          dim,

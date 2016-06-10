@@ -68,7 +68,7 @@ mod bench {
                 (s2048, 2048, 2048)
                 }
 
-    bench_step!{simd_single, wave_step_single,
+    bench_step!{simd_double, wave_step_double,
                 (s128, 128, 128)
                 (s512, 512, 512)
                 (s2048, 2048, 2048)
